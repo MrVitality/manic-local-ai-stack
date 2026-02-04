@@ -1,0 +1,351 @@
+name: ultimate-ai-stack
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    ports:
+      - "100.81.119.103:11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+    networks:
+      - ai-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant
+    restart: unless-stopped
+    ports:
+      - "100.81.119.103:6333:6333"
+      - "100.81.119.103:6334:6334"
+    volumes:
+      - qdrant-data:/qdrant/storage
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+    networks:
+      - ai-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: ai-redis
+    restart: unless-stopped
+    ports:
+      - "100.81.119.103:6380:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    networks:
+      - ai-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  supabase-db:
+    image: supabase/postgres:15.1.1.78
+    container_name: ai-supabase-db
+    restart: unless-stopped
+    ports:
+      - "100.81.119.103:5433:5432"
+    volumes:
+      - supabase-db-data:/var/lib/postgresql/data
+      - ./supabase/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    env_file:
+      - .env
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_connections=200
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - effective_cache_size=768MB
+      - -c
+      - listen_addresses=*
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+    networks:
+      - ai-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  supabase-auth:
+    image: supabase/gotrue:v2.143.0
+    container_name: ai-supabase-auth
+    restart: unless-stopped
+    depends_on:
+      supabase-db:
+        condition: service_healthy
+    env_file:
+      - .env
+    networks:
+      - ai-network
+
+  supabase-rest:
+    image: postgrest/postgrest:v12.0.1
+    container_name: ai-supabase-rest
+    restart: unless-stopped
+    depends_on:
+      supabase-db:
+        condition: service_healthy
+    env_file:
+      - .env
+    networks:
+      - ai-network
+
+  supabase-meta:
+    image: supabase/postgres-meta:v0.80.0
+    container_name: ai-supabase-meta
+    restart: unless-stopped
+    depends_on:
+      supabase-db:
+        condition: service_healthy
+    environment:
+      PG_META_PORT: "8080"
+      PG_META_DB_URL: postgresql://postgres:${POSTGRES_PASSWORD}@supabase-db:5432/postgres
+    networks:
+      - ai-network
+
+  supabase-storage:
+    image: supabase/storage-api:v0.46.4
+    container_name: ai-supabase-storage
+    restart: unless-stopped
+    depends_on:
+      supabase-db:
+        condition: service_healthy
+    env_file:
+      - .env
+    volumes:
+      - supabase-storage-data:/var/lib/storage
+    networks:
+      - ai-network
+
+  supabase-kong:
+    image: kong:2.8.1
+    container_name: ai-supabase-kong
+    restart: unless-stopped
+    ports:
+      - "100.81.119.103:8001:8000"
+      - "100.81.119.103:8444:8443"
+    env_file:
+      - .env
+    volumes:
+      - ./supabase/kong.yml:/var/lib/kong/kong.yml:ro
+    networks:
+      - ai-network
+
+  supabase-studio:
+    image: supabase/studio:20240101-8e4a094
+    container_name: ai-supabase-studio
+    restart: unless-stopped
+    ports:
+      - "100.81.119.103:3005:3000"
+    depends_on:
+      - supabase-meta
+    env_file:
+      - .env
+    networks:
+      - ai-network
+
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: ai-n8n
+    restart: unless-stopped
+    ports:
+      - "100.81.119.103:5679:5678"
+    volumes:
+      - n8n-data:/home/node/.n8n
+    environment:
+      - N8N_PORT=5678
+      - N8N_RUNNERS_DISABLED=true
+      - N8N_SECURE_COOKIE=false
+      - GENERIC_TIMEZONE=UTC
+      - N8N_HOST=100.81.119.103
+      - WEBHOOK_URL=http://100.81.119.103:5679/
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    networks:
+      - ai-network
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: ai-open-webui
+    restart: unless-stopped
+    ports:
+      - "100.81.119.103:3006:8080"
+    volumes:
+      - open-webui-data:/app/backend/data
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - WEBUI_AUTH=false
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+    networks:
+      - ai-network
+
+  searxng:
+    image: searxng/searxng:latest
+    container_name: ai-searxng
+    restart: unless-stopped
+    ports:
+      - "100.81.119.103:8889:8080"
+    volumes:
+      - ./searxng:/etc/searxng
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    networks:
+      - ai-network
+
+  pydantic-ai:
+    image: python:3.11-slim
+    container_name: ai-pydantic-ai
+    restart: unless-stopped
+    ports:
+      - "100.81.119.103:8082:8080"
+    volumes:
+      - ./pydantic-ai:/app
+      - pydantic-ai-data:/app/data
+    working_dir: /app
+    command:
+      - sh
+      - -c
+      - "pip install -q pydantic-ai pydantic-ai-slim[openai] pydantic-settings fastapi uvicorn httpx asyncpg && python pydantic_ai_service.py"
+    environment:
+      - OLLAMA_EXTERNAL_URL=http://100.81.119.103:11434
+      - SUPABASE_URL=http://100.81.119.103:8001
+      - QDRANT_URL=http://100.81.119.103:6333
+    depends_on:
+      - ollama
+      - supabase-db
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    networks:
+      - ai-network
+
+  langfuse-db:
+    image: postgres:15-alpine
+    container_name: ai-langfuse-db
+    restart: unless-stopped
+    volumes:
+      - langfuse-db-data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_USER=langfuse
+      - POSTGRES_PASSWORD=${LANGFUSE_DB_PASSWORD}
+      - POSTGRES_DB=langfuse
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    networks:
+      - ai-network
+
+  langfuse:
+    image: langfuse/langfuse:2
+    container_name: ai-langfuse
+    restart: unless-stopped
+    ports:
+      - "100.81.119.103:3007:3000"
+    depends_on:
+      - langfuse-db
+    environment:
+      - DATABASE_URL=postgresql://langfuse:${LANGFUSE_DB_PASSWORD}@langfuse-db:5432/langfuse
+      - NEXTAUTH_SECRET=${LANGFUSE_SECRET}
+      - NEXTAUTH_URL=http://100.81.119.103:3007
+      - SALT=${LANGFUSE_SALT}
+      - TELEMETRY_ENABLED=false
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    networks:
+      - ai-network
+
+  flowise:
+    image: flowiseai/flowise:latest
+    container_name: ai-flowise
+    restart: unless-stopped
+    ports:
+      - "100.81.119.103:3008:3000"
+    volumes:
+      - flowise-data:/root/.flowise
+    environment:
+      - FLOWISE_USERNAME=admin
+      - FLOWISE_PASSWORD=${FLOWISE_PASSWORD}
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    networks:
+      - ai-network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: ai-frontend
+    restart: unless-stopped
+    ports:
+      - "100.81.119.103:3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://100.81.119.103:11434
+      - NEXT_PUBLIC_SUPABASE_URL=http://100.81.119.103:8001
+      - NEXT_PUBLIC_SUPABASE_ANON_KEY=${ANON_KEY}
+      - LANGFUSE_HOST=http://100.81.119.103:3007
+    depends_on:
+      - ollama
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    networks:
+      - ai-network
+
+networks:
+  ai-network:
+    driver: bridge
+
+volumes:
+  ollama-data:
+  qdrant-data:
+  redis-data:
+  supabase-db-data:
+  supabase-storage-data:
+  n8n-data:
+  open-webui-data:
+  pydantic-ai-data:
+  langfuse-db-data:
+  flowise-data:

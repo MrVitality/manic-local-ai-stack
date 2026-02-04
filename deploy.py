@@ -62,6 +62,7 @@ PORTS = {
     "flowise": 3008 if USE_ALTERNATE_PORTS else 3004,        # Default: 3004
     "searxng": 8889 if USE_ALTERNATE_PORTS else 8888,        # Default: 8888
     "pydantic_ai": 8082 if USE_ALTERNATE_PORTS else 8080,    # Default: 8080
+    "frontend": 3000,         # AI Chat Frontend
 }
 
 
@@ -114,6 +115,13 @@ class QuickDeployer:
             self.base_dir / "backups",
             self.base_dir / "logs",
             self.base_dir / "pydantic-ai",
+            self.base_dir / "frontend",
+            self.base_dir / "frontend" / "app",
+            self.base_dir / "frontend" / "components",
+            self.base_dir / "frontend" / "lib",
+            self.base_dir / "frontend" / "hooks",
+            self.base_dir / "frontend" / "types",
+            self.base_dir / "frontend" / "public",
         ]
         for d in dirs:
             d.mkdir(parents=True, exist_ok=True)
@@ -127,18 +135,19 @@ class QuickDeployer:
             "minimal": {
                 "ollama": "4G", "qdrant": "1G", "redis": "256M",
                 "supabase-db": "1G", "open-webui": "1G", "n8n": "512M",
-                "pydantic-ai": "512M"
+                "pydantic-ai": "512M", "frontend": "512M"
             },
             "standard": {
                 "ollama": "8G", "qdrant": "2G", "redis": "512M",
                 "supabase-db": "2G", "open-webui": "2G", "n8n": "1G",
-                "langfuse": "1G", "flowise": "1G", "pydantic-ai": "1G"
+                "langfuse": "1G", "flowise": "1G", "pydantic-ai": "1G",
+                "frontend": "512M"
             },
             "full": {
                 "ollama": "12G", "qdrant": "4G", "redis": "1G",
                 "supabase-db": "4G", "open-webui": "2G", "n8n": "2G",
                 "langfuse": "2G", "flowise": "2G", "neo4j": "4G",
-                "pydantic-ai": "1G"
+                "pydantic-ai": "1G", "frontend": "1G"
             }
         }
         
@@ -303,6 +312,24 @@ class QuickDeployer:
                     },
                     "depends_on": ["ollama", "supabase-db"],
                     "deploy": {"resources": {"limits": {"memory": mem["pydantic-ai"]}}},
+                    "networks": ["ai-network"]
+                },
+                "frontend": {
+                    "build": {
+                        "context": "./frontend",
+                        "dockerfile": "Dockerfile"
+                    },
+                    "container_name": "ai-frontend",
+                    "restart": "unless-stopped",
+                    "ports": [f"{ts}:{p['frontend']}:3000"],
+                    "environment": {
+                        "NEXT_PUBLIC_API_URL": f"http://{ts}:{p['ollama']}",
+                        "NEXT_PUBLIC_SUPABASE_URL": f"http://{ts}:{p['supabase_api']}",
+                        "NEXT_PUBLIC_SUPABASE_ANON_KEY": self.anon_key,
+                        "LANGFUSE_HOST": f"http://{ts}:{p['langfuse']}"
+                    },
+                    "depends_on": ["ollama"],
+                    "deploy": {"resources": {"limits": {"memory": mem.get("frontend", "512M")}}},
                     "networks": ["ai-network"]
                 }
             },
@@ -767,6 +794,349 @@ if __name__ == "__main__":
         self.write_sql_init()
         self.write_pydantic_ai_service()
         self.write_searxng_settings()
+        self.write_frontend_files()
+    
+    def write_frontend_files(self):
+        """Write the AI Chat Frontend files."""
+        ts = self.tailscale_ip
+        p = PORTS
+        frontend_dir = self.base_dir / "frontend"
+        
+        # package.json
+        (frontend_dir / "package.json").write_text('''{
+  "name": "ai-agent-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "next": "14.2.21",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-markdown": "^9.0.1",
+    "zustand": "^5.0.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.12",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.17",
+    "typescript": "^5.7.2"
+  }
+}
+''')
+        
+        # Dockerfile
+        (frontend_dir / "Dockerfile").write_text('''FROM node:20-alpine AS builder
+WORKDIR /app
+COPY package*.json ./
+RUN npm install
+RUN mkdir -p public
+COPY . .
+RUN npm run build
+
+FROM node:20-alpine AS runner
+WORKDIR /app
+ENV NODE_ENV=production
+RUN addgroup --system --gid 1001 nodejs
+RUN adduser --system --uid 1001 nextjs
+COPY --from=builder /app/public ./public
+COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
+COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+USER nextjs
+EXPOSE 3000
+ENV PORT=3000
+ENV HOSTNAME="0.0.0.0"
+CMD ["node", "server.js"]
+''')
+        
+        # next.config.js
+        (frontend_dir / "next.config.js").write_text(f'''/** @type {{import('next').NextConfig}} */
+const nextConfig = {{
+  output: 'standalone',
+  reactStrictMode: true,
+  images: {{
+    domains: ['localhost', '{ts}'],
+  }},
+  env: {{
+    NEXT_PUBLIC_API_URL: process.env.NEXT_PUBLIC_API_URL || 'http://{ts}:{p["ollama"]}',
+    NEXT_PUBLIC_SUPABASE_URL: process.env.NEXT_PUBLIC_SUPABASE_URL || 'http://{ts}:{p["supabase_api"]}',
+  }},
+}}
+module.exports = nextConfig
+''')
+        
+        # tsconfig.json
+        (frontend_dir / "tsconfig.json").write_text('''{
+  "compilerOptions": {
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "allowJs": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "preserve",
+    "incremental": true,
+    "plugins": [{"name": "next"}],
+    "paths": {"@/*": ["./*"]}
+  },
+  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
+  "exclude": ["node_modules"]
+}
+''')
+        
+        # tailwind.config.js
+        (frontend_dir / "tailwind.config.js").write_text('''/** @type {import('tailwindcss').Config} */
+module.exports = {
+  content: ['./app/**/*.{js,ts,jsx,tsx}', './components/**/*.{js,ts,jsx,tsx}'],
+  theme: { extend: {} },
+  plugins: [],
+}
+''')
+        
+        # postcss.config.js
+        (frontend_dir / "postcss.config.js").write_text('''module.exports = {
+  plugins: { tailwindcss: {}, autoprefixer: {} },
+}
+''')
+        
+        # next-env.d.ts
+        (frontend_dir / "next-env.d.ts").write_text('''/// <reference types="next" />
+/// <reference types="next/image-types/global" />
+''')
+        
+        # app/globals.css
+        (frontend_dir / "app" / "globals.css").write_text('''@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: #0a0a0a;
+  --foreground: #ededed;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: system-ui, -apple-system, sans-serif;
+}
+
+.markdown-body pre {
+  background: #1e1e1e;
+  padding: 1rem;
+  border-radius: 0.5rem;
+  overflow-x: auto;
+}
+
+.markdown-body code {
+  background: #2d2d2d;
+  padding: 0.2rem 0.4rem;
+  border-radius: 0.25rem;
+}
+''')
+        
+        # app/layout.tsx
+        (frontend_dir / "app" / "layout.tsx").write_text('''import "./globals.css"
+import type { Metadata } from "next"
+
+export const metadata: Metadata = {
+  title: "AI Chat",
+  description: "Local AI Chat Interface",
+}
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html lang="en">
+      <body>{children}</body>
+    </html>
+  )
+}
+''')
+        
+        # app/page.tsx - Main chat interface
+        (frontend_dir / "app" / "page.tsx").write_text(f'''"use client"
+import {{ useState, useRef, useEffect }} from "react"
+import ReactMarkdown from "react-markdown"
+
+interface Message {{
+  role: "user" | "assistant"
+  content: string
+}}
+
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://{ts}:{p['ollama']}"
+
+export default function Home() {{
+  const [messages, setMessages] = useState<Message[]>([])
+  const [input, setInput] = useState("")
+  const [isLoading, setIsLoading] = useState(false)
+  const [model, setModel] = useState("llama3.2:3b")
+  const [models, setModels] = useState<string[]>([])
+  const messagesEndRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {{
+    fetch(`${{API_URL}}/api/tags`)
+      .then(res => res.json())
+      .then(data => setModels(data.models?.map((m: any) => m.name) || []))
+      .catch(console.error)
+  }}, [])
+
+  useEffect(() => {{
+    messagesEndRef.current?.scrollIntoView({{ behavior: "smooth" }})
+  }}, [messages])
+
+  const sendMessage = async () => {{
+    if (!input.trim() || isLoading) return
+
+    const userMessage: Message = {{ role: "user", content: input }}
+    setMessages(prev => [...prev, userMessage])
+    setInput("")
+    setIsLoading(true)
+
+    try {{
+      const response = await fetch(`${{API_URL}}/api/chat`, {{
+        method: "POST",
+        headers: {{ "Content-Type": "application/json" }},
+        body: JSON.stringify({{
+          model,
+          messages: [...messages, userMessage].map(m => ({{ role: m.role, content: m.content }})),
+          stream: true,
+        }}),
+      }})
+
+      const reader = response.body?.getReader()
+      if (!reader) throw new Error("No reader")
+
+      let assistantContent = ""
+      setMessages(prev => [...prev, {{ role: "assistant", content: "" }}])
+
+      while (true) {{
+        const {{ done, value }} = await reader.read()
+        if (done) break
+
+        const text = new TextDecoder().decode(value)
+        const lines = text.split("\\n").filter(Boolean)
+        
+        for (const line of lines) {{
+          try {{
+            const data = JSON.parse(line)
+            if (data.message?.content) {{
+              assistantContent += data.message.content
+              setMessages(prev => [
+                ...prev.slice(0, -1),
+                {{ role: "assistant", content: assistantContent }}
+              ])
+            }}
+          }} catch {{}}
+        }}
+      }}
+    }} catch (error) {{
+      console.error("Error:", error)
+      setMessages(prev => [...prev, {{ role: "assistant", content: "Error: Failed to get response" }}])
+    }} finally {{
+      setIsLoading(false)
+    }}
+  }}
+
+  return (
+    <main className="flex flex-col h-screen bg-zinc-900">
+      {{/* Header */}}
+      <header className="flex items-center justify-between px-6 py-4 border-b border-zinc-700">
+        <h1 className="text-xl font-semibold text-white">🤖 AI Chat</h1>
+        <select
+          value={{model}}
+          onChange={{(e) => setModel(e.target.value)}}
+          className="bg-zinc-800 text-white px-3 py-2 rounded-lg border border-zinc-600"
+        >
+          {{models.map(m => <option key={{m}} value={{m}}>{{m}}</option>)}}
+        </select>
+      </header>
+
+      {{/* Messages */}}
+      <div className="flex-1 overflow-y-auto p-6 space-y-4">
+        {{messages.length === 0 && (
+          <div className="text-center text-zinc-500 mt-20">
+            <p className="text-4xl mb-4">👋</p>
+            <p>Start a conversation with your local AI</p>
+          </div>
+        )}}
+        {{messages.map((msg, i) => (
+          <div key={{i}} className={{`flex ${{msg.role === "user" ? "justify-end" : "justify-start"}}`}}>
+            <div className={{`max-w-3xl px-4 py-3 rounded-2xl ${{
+              msg.role === "user" 
+                ? "bg-blue-600 text-white" 
+                : "bg-zinc-800 text-zinc-100"
+            }}`}}>
+              {{msg.role === "assistant" ? (
+                <ReactMarkdown className="markdown-body prose prose-invert max-w-none">
+                  {{msg.content || "..."}}
+                </ReactMarkdown>
+              ) : msg.content}}
+            </div>
+          </div>
+        ))}}
+        <div ref={{messagesEndRef}} />
+      </div>
+
+      {{/* Input */}}
+      <div className="p-4 border-t border-zinc-700">
+        <div className="flex gap-3 max-w-4xl mx-auto">
+          <input
+            type="text"
+            value={{input}}
+            onChange={{(e) => setInput(e.target.value)}}
+            onKeyDown={{(e) => e.key === "Enter" && !e.shiftKey && sendMessage()}}
+            placeholder="Type a message..."
+            className="flex-1 bg-zinc-800 text-white px-4 py-3 rounded-xl border border-zinc-600 focus:outline-none focus:border-blue-500"
+            disabled={{isLoading}}
+          />
+          <button
+            onClick={{sendMessage}}
+            disabled={{isLoading || !input.trim()}}
+            className="px-6 py-3 bg-blue-600 text-white rounded-xl hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {{isLoading ? "..." : "Send"}}
+          </button>
+        </div>
+      </div>
+    </main>
+  )
+}}
+''')
+
+        # types/index.ts
+        (frontend_dir / "types" / "index.ts").write_text('''export interface Message {
+  role: "user" | "assistant" | "system"
+  content: string
+}
+
+export interface Model {
+  name: string
+  size: number
+  modified_at: string
+}
+
+export interface ModelsResponse {
+  models: Model[]
+}
+''')
+
+        # public/favicon.svg
+        (frontend_dir / "public" / "favicon.svg").write_text('''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <text y=".9em" font-size="90">🤖</text>
+</svg>
+''')
+
+        print("✓ Created frontend/")
     
     def deploy(self, pull: bool = True):
         """Deploy the stack."""
@@ -840,6 +1210,7 @@ def main():
     if deployer.deploy(pull=not args.no_pull):
         p = PORTS
         print(f"\n📍 Access via Tailscale ({ts}):")
+        print(f"   🤖 AI Chat Frontend: http://{ts}:{p['frontend']}")
         print(f"   Open WebUI:        http://{ts}:{p['open_webui']}")
         print(f"   n8n:               http://{ts}:{p['n8n']}")
         print(f"   Supabase Studio:   http://{ts}:{p['supabase_studio']}")
@@ -862,7 +1233,9 @@ def main():
             time.sleep(20)
             pull_models(ts, ["llama3.2:3b", "nomic-embed-text"])
         
-        print(f"\n🎉 Stack deployed! Test: curl http://{ts}:{p['pydantic_ai']}/health")
+        print(f"\n🎉 Stack deployed!")
+        print(f"   Chat Frontend: http://{ts}:{p['frontend']}")
+        print(f"   Test API: curl http://{ts}:{p['pydantic_ai']}/health")
         return 0
     return 1
 
