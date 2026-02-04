@@ -1,1 +1,0 @@
-# manic-local-ai-stack
