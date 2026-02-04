@@ -43,6 +43,27 @@ except ImportError:
 # Default Tailscale IP - CHANGE THIS to your Tailscale IP
 DEFAULT_TAILSCALE_IP = "100.100.180.114"
 
+# Alternate ports to avoid conflicts with existing Dokploy services
+# Set to True if you have existing Supabase/Redis running
+USE_ALTERNATE_PORTS = True
+
+PORTS = {
+    "postgres": 5433 if USE_ALTERNATE_PORTS else 5432,      # Default: 5432
+    "redis": 6380 if USE_ALTERNATE_PORTS else 6379,          # Default: 6379
+    "supabase_api": 8001 if USE_ALTERNATE_PORTS else 8000,   # Default: 8000
+    "supabase_ssl": 8444 if USE_ALTERNATE_PORTS else 8443,   # Default: 8443
+    "supabase_studio": 3005 if USE_ALTERNATE_PORTS else 3001, # Default: 3001
+    "ollama": 11434,          # Usually no conflict
+    "qdrant": 6333,           # Usually no conflict
+    "qdrant_grpc": 6334,      # Usually no conflict
+    "n8n": 5679 if USE_ALTERNATE_PORTS else 5678,            # Default: 5678
+    "open_webui": 3006 if USE_ALTERNATE_PORTS else 3003,     # Default: 3003
+    "langfuse": 3007 if USE_ALTERNATE_PORTS else 3002,       # Default: 3002
+    "flowise": 3008 if USE_ALTERNATE_PORTS else 3004,        # Default: 3004
+    "searxng": 8889 if USE_ALTERNATE_PORTS else 8888,        # Default: 8888
+    "pydantic_ai": 8082 if USE_ALTERNATE_PORTS else 8080,    # Default: 8080
+}
+
 
 def generate_secret(length: int = 32) -> str:
     """Generate a cryptographically secure random secret."""
@@ -123,6 +144,7 @@ class QuickDeployer:
         
         mem = memory_config.get(self.profile, memory_config["standard"])
         ts = self.tailscale_ip
+        p = PORTS  # Port mappings
         
         compose = {
             "name": "ultimate-ai-stack",
@@ -131,7 +153,7 @@ class QuickDeployer:
                     "image": "ollama/ollama:latest",
                     "container_name": "ollama",
                     "restart": "unless-stopped",
-                    "ports": [f"{ts}:11434:11434"],
+                    "ports": [f"{ts}:{p['ollama']}:11434"],
                     "volumes": ["ollama-data:/root/.ollama"],
                     "env_file": [".env"],
                     "deploy": {"resources": {"limits": {"memory": mem["ollama"]}}},
@@ -148,16 +170,16 @@ class QuickDeployer:
                     "image": "qdrant/qdrant:latest",
                     "container_name": "qdrant",
                     "restart": "unless-stopped",
-                    "ports": [f"{ts}:6333:6333", f"{ts}:6334:6334"],
+                    "ports": [f"{ts}:{p['qdrant']}:6333", f"{ts}:{p['qdrant_grpc']}:6334"],
                     "volumes": ["qdrant-data:/qdrant/storage"],
                     "deploy": {"resources": {"limits": {"memory": mem["qdrant"]}}},
                     "networks": ["ai-network"]
                 },
                 "redis": {
                     "image": "redis:7-alpine",
-                    "container_name": "redis",
+                    "container_name": "ai-redis",
                     "restart": "unless-stopped",
-                    "ports": [f"{ts}:6379:6379"],
+                    "ports": [f"{ts}:{p['redis']}:6379"],
                     "volumes": ["redis-data:/data"],
                     "command": "redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru",
                     "deploy": {"resources": {"limits": {"memory": mem["redis"]}}},
@@ -166,9 +188,9 @@ class QuickDeployer:
                 },
                 "supabase-db": {
                     "image": "supabase/postgres:15.1.1.78",
-                    "container_name": "supabase-db",
+                    "container_name": "ai-supabase-db",
                     "restart": "unless-stopped",
-                    "ports": [f"{ts}:5432:5432"],
+                    "ports": [f"{ts}:{p['postgres']}:5432"],
                     "volumes": [
                         "supabase-db-data:/var/lib/postgresql/data",
                         "./supabase/init.sql:/docker-entrypoint-initdb.d/init.sql:ro"
@@ -183,7 +205,7 @@ class QuickDeployer:
                 },
                 "supabase-auth": {
                     "image": "supabase/gotrue:v2.143.0",
-                    "container_name": "supabase-auth",
+                    "container_name": "ai-supabase-auth",
                     "restart": "unless-stopped",
                     "depends_on": {"supabase-db": {"condition": "service_healthy"}},
                     "env_file": [".env"],
@@ -191,7 +213,7 @@ class QuickDeployer:
                 },
                 "supabase-rest": {
                     "image": "postgrest/postgrest:v12.0.1",
-                    "container_name": "supabase-rest",
+                    "container_name": "ai-supabase-rest",
                     "restart": "unless-stopped",
                     "depends_on": {"supabase-db": {"condition": "service_healthy"}},
                     "env_file": [".env"],
@@ -199,7 +221,7 @@ class QuickDeployer:
                 },
                 "supabase-meta": {
                     "image": "supabase/postgres-meta:v0.80.0",
-                    "container_name": "supabase-meta",
+                    "container_name": "ai-supabase-meta",
                     "restart": "unless-stopped",
                     "depends_on": {"supabase-db": {"condition": "service_healthy"}},
                     "environment": {
@@ -210,7 +232,7 @@ class QuickDeployer:
                 },
                 "supabase-storage": {
                     "image": "supabase/storage-api:v0.46.4",
-                    "container_name": "supabase-storage",
+                    "container_name": "ai-supabase-storage",
                     "restart": "unless-stopped",
                     "depends_on": {"supabase-db": {"condition": "service_healthy"}},
                     "env_file": [".env"],
@@ -219,27 +241,27 @@ class QuickDeployer:
                 },
                 "supabase-kong": {
                     "image": "kong:2.8.1",
-                    "container_name": "supabase-kong",
+                    "container_name": "ai-supabase-kong",
                     "restart": "unless-stopped",
-                    "ports": [f"{ts}:8000:8000", f"{ts}:8443:8443"],
+                    "ports": [f"{ts}:{p['supabase_api']}:8000", f"{ts}:{p['supabase_ssl']}:8443"],
                     "env_file": [".env"],
                     "volumes": ["./supabase/kong.yml:/var/lib/kong/kong.yml:ro"],
                     "networks": ["ai-network"]
                 },
                 "supabase-studio": {
                     "image": "supabase/studio:20240101-8e4a094",
-                    "container_name": "supabase-studio",
+                    "container_name": "ai-supabase-studio",
                     "restart": "unless-stopped",
-                    "ports": [f"{ts}:3001:3000"],
+                    "ports": [f"{ts}:{p['supabase_studio']}:3000"],
                     "depends_on": ["supabase-meta"],
                     "env_file": [".env"],
                     "networks": ["ai-network"]
                 },
                 "n8n": {
                     "image": "n8nio/n8n:latest",
-                    "container_name": "n8n",
+                    "container_name": "ai-n8n",
                     "restart": "unless-stopped",
-                    "ports": [f"{ts}:5678:5678"],
+                    "ports": [f"{ts}:{p['n8n']}:5678"],
                     "volumes": ["n8n-data:/home/node/.n8n"],
                     "env_file": [".env"],
                     "deploy": {"resources": {"limits": {"memory": mem["n8n"]}}},
@@ -247,9 +269,9 @@ class QuickDeployer:
                 },
                 "open-webui": {
                     "image": "ghcr.io/open-webui/open-webui:main",
-                    "container_name": "open-webui",
+                    "container_name": "ai-open-webui",
                     "restart": "unless-stopped",
-                    "ports": [f"{ts}:3003:8080"],
+                    "ports": [f"{ts}:{p['open_webui']}:8080"],
                     "volumes": ["open-webui-data:/app/backend/data"],
                     "environment": {"OLLAMA_BASE_URL": "http://ollama:11434", "WEBUI_AUTH": "false"},
                     "deploy": {"resources": {"limits": {"memory": mem["open-webui"]}}},
@@ -257,27 +279,27 @@ class QuickDeployer:
                 },
                 "searxng": {
                     "image": "searxng/searxng:latest",
-                    "container_name": "searxng",
+                    "container_name": "ai-searxng",
                     "restart": "unless-stopped",
-                    "ports": [f"{ts}:8888:8080"],
+                    "ports": [f"{ts}:{p['searxng']}:8080"],
                     "volumes": ["./searxng:/etc/searxng"],
                     "deploy": {"resources": {"limits": {"memory": "512M"}}},
                     "networks": ["ai-network"]
                 },
                 "pydantic-ai": {
                     "image": "python:3.11-slim",
-                    "container_name": "pydantic-ai",
+                    "container_name": "ai-pydantic-ai",
                     "restart": "unless-stopped",
-                    "ports": [f"{ts}:8080:8080"],
+                    "ports": [f"{ts}:{p['pydantic_ai']}:8080"],
                     "volumes": ["./pydantic-ai:/app", "pydantic-ai-data:/app/data"],
                     "working_dir": "/app",
                     "command": ["sh", "-c",
                         "pip install -q pydantic-ai pydantic-ai-slim[openai] pydantic-settings fastapi uvicorn httpx asyncpg && python pydantic_ai_service.py"],
                     "environment": {
-                        "OLLAMA_EXTERNAL_URL": f"http://{ts}:11434",
-                        "SUPABASE_URL": f"http://{ts}:8000",
+                        "OLLAMA_EXTERNAL_URL": f"http://{ts}:{p['ollama']}",
+                        "SUPABASE_URL": f"http://{ts}:{p['supabase_api']}",
                         "DATABASE_URL": f"postgresql://postgres:{self.postgres_password}@supabase-db:5432/postgres",
-                        "QDRANT_URL": f"http://{ts}:6333"
+                        "QDRANT_URL": f"http://{ts}:{p['qdrant']}"
                     },
                     "depends_on": ["ollama", "supabase-db"],
                     "deploy": {"resources": {"limits": {"memory": mem["pydantic-ai"]}}},
@@ -296,7 +318,7 @@ class QuickDeployer:
         if self.profile in ["standard", "full"]:
             compose["services"]["langfuse-db"] = {
                 "image": "postgres:15-alpine",
-                "container_name": "langfuse-db",
+                "container_name": "ai-langfuse-db",
                 "restart": "unless-stopped",
                 "volumes": ["langfuse-db-data:/var/lib/postgresql/data"],
                 "environment": {"POSTGRES_USER": "langfuse", "POSTGRES_PASSWORD": self.langfuse_db_password, "POSTGRES_DB": "langfuse"},
@@ -305,13 +327,13 @@ class QuickDeployer:
             }
             compose["services"]["langfuse"] = {
                 "image": "langfuse/langfuse:2",
-                "container_name": "langfuse",
+                "container_name": "ai-langfuse",
                 "restart": "unless-stopped",
-                "ports": [f"{ts}:3002:3000"],
+                "ports": [f"{ts}:{p['langfuse']}:3000"],
                 "depends_on": ["langfuse-db"],
                 "environment": {
                     "DATABASE_URL": f"postgresql://langfuse:{self.langfuse_db_password}@langfuse-db:5432/langfuse",
-                    "NEXTAUTH_SECRET": self.langfuse_secret, "NEXTAUTH_URL": f"http://{ts}:3002",
+                    "NEXTAUTH_SECRET": self.langfuse_secret, "NEXTAUTH_URL": f"http://{ts}:{p['langfuse']}",
                     "SALT": generate_secret(32), "TELEMETRY_ENABLED": "false"
                 },
                 "deploy": {"resources": {"limits": {"memory": mem.get("langfuse", "1G")}}},
@@ -319,9 +341,9 @@ class QuickDeployer:
             }
             compose["services"]["flowise"] = {
                 "image": "flowiseai/flowise:latest",
-                "container_name": "flowise",
+                "container_name": "ai-flowise",
                 "restart": "unless-stopped",
-                "ports": [f"{ts}:3004:3000"],
+                "ports": [f"{ts}:{p['flowise']}:3000"],
                 "volumes": ["flowise-data:/root/.flowise"],
                 "environment": {"FLOWISE_USERNAME": "admin", "FLOWISE_PASSWORD": generate_secret(16)},
                 "deploy": {"resources": {"limits": {"memory": mem.get("flowise", "1G")}}},
@@ -334,7 +356,7 @@ class QuickDeployer:
         if self.profile == "full":
             compose["services"]["neo4j"] = {
                 "image": "neo4j:5-community",
-                "container_name": "neo4j",
+                "container_name": "ai-neo4j",
                 "restart": "unless-stopped",
                 "ports": [f"{ts}:7474:7474", f"{ts}:7687:7687"],
                 "volumes": ["neo4j-data:/data", "neo4j-logs:/logs"],
@@ -350,9 +372,11 @@ class QuickDeployer:
     def generate_env_file(self) -> str:
         """Generate .env file with Tailscale URLs."""
         ts = self.tailscale_ip
+        p = PORTS
         return f"""# Ultimate AI Stack - Environment Configuration
 # Generated: {datetime.now().isoformat()}
 # Tailscale IP: {ts}
+# Using alternate ports: {USE_ALTERNATE_PORTS}
 
 # === POSTGRESQL ===
 POSTGRES_USER=postgres
@@ -364,14 +388,14 @@ DATABASE_URL=postgresql://postgres:{self.postgres_password}@supabase-db:5432/pos
 JWT_SECRET={self.jwt_secret}
 ANON_KEY={self.anon_key}
 SERVICE_ROLE_KEY={self.service_role_key}
-SUPABASE_URL=http://{ts}:8000
+SUPABASE_URL=http://{ts}:{p['supabase_api']}
 
 # === GOTRUE ===
 GOTRUE_API_HOST=0.0.0.0
 GOTRUE_API_PORT=9999
 GOTRUE_DB_DRIVER=postgres
 GOTRUE_DB_DATABASE_URL=postgresql://postgres:{self.postgres_password}@supabase-db:5432/postgres?search_path=auth
-GOTRUE_SITE_URL=http://{ts}:3000
+GOTRUE_SITE_URL=http://{ts}:{p['open_webui']}
 GOTRUE_URI_ALLOW_LIST=*
 GOTRUE_DISABLE_SIGNUP=false
 GOTRUE_JWT_SECRET={self.jwt_secret}
@@ -404,19 +428,19 @@ KONG_PLUGINS=request-transformer,cors,key-auth,acl
 # === STUDIO ===
 STUDIO_DEFAULT_ORGANIZATION=Default Organization
 STUDIO_DEFAULT_PROJECT=Default Project
-SUPABASE_PUBLIC_URL=http://{ts}:8000
+SUPABASE_PUBLIC_URL=http://{ts}:{p['supabase_api']}
 STUDIO_PG_META_URL=http://supabase-meta:8080
 
 # === OLLAMA ===
 OLLAMA_BASE_URL=http://ollama:11434
-OLLAMA_EXTERNAL_URL=http://{ts}:11434
+OLLAMA_EXTERNAL_URL=http://{ts}:{p['ollama']}
 OLLAMA_KEEP_ALIVE=5m
 
 # === N8N ===
 N8N_ENCRYPTION_KEY={generate_secret(32)}
 N8N_HOST={ts}
-N8N_PORT=5678
-WEBHOOK_URL=http://{ts}:5678/
+N8N_PORT={p['n8n']}
+WEBHOOK_URL=http://{ts}:{p['n8n']}/
 GENERIC_TIMEZONE=UTC
 
 # === PYDANTIC AI ===
@@ -814,25 +838,31 @@ def main():
     deployer.write_all_configs()
     
     if deployer.deploy(pull=not args.no_pull):
+        p = PORTS
         print(f"\n📍 Access via Tailscale ({ts}):")
-        print(f"   Open WebUI:        http://{ts}:3003")
-        print(f"   n8n:               http://{ts}:5678")
-        print(f"   Supabase Studio:   http://{ts}:3001")
-        print(f"   Supabase API:      http://{ts}:8000")
-        print(f"   Pydantic AI API:   http://{ts}:8080")
+        print(f"   Open WebUI:        http://{ts}:{p['open_webui']}")
+        print(f"   n8n:               http://{ts}:{p['n8n']}")
+        print(f"   Supabase Studio:   http://{ts}:{p['supabase_studio']}")
+        print(f"   Supabase API:      http://{ts}:{p['supabase_api']}")
+        print(f"   Pydantic AI API:   http://{ts}:{p['pydantic_ai']}")
         if args.profile in ["standard", "full"]:
-            print(f"   Langfuse:          http://{ts}:3002")
-            print(f"   Flowise:           http://{ts}:3004")
-        print(f"   SearXNG:           http://{ts}:8888")
-        print(f"   Ollama API:        http://{ts}:11434")
-        print(f"   Qdrant:            http://{ts}:6333")
+            print(f"   Langfuse:          http://{ts}:{p['langfuse']}")
+            print(f"   Flowise:           http://{ts}:{p['flowise']}")
+        print(f"   SearXNG:           http://{ts}:{p['searxng']}")
+        print(f"   Ollama API:        http://{ts}:{p['ollama']}")
+        print(f"   Qdrant:            http://{ts}:{p['qdrant']}")
+        print(f"   PostgreSQL:        {ts}:{p['postgres']}")
+        print(f"   Redis:             {ts}:{p['redis']}")
+        
+        if USE_ALTERNATE_PORTS:
+            print(f"\n⚠️  Using ALTERNATE PORTS to avoid conflicts with existing services")
         
         if args.models:
             print("\n⏳ Waiting for Ollama...")
             time.sleep(20)
             pull_models(ts, ["llama3.2:3b", "nomic-embed-text"])
         
-        print(f"\n🎉 Stack deployed! Test: curl http://{ts}:8080/health")
+        print(f"\n🎉 Stack deployed! Test: curl http://{ts}:{p['pydantic_ai']}/health")
         return 0
     return 1
 
